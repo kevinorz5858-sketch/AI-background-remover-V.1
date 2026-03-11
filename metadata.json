@@ -1,0 +1,5 @@
+{
+  "name": "AI Background Remover",
+  "description": "A modern web-based tool to remove image backgrounds directly in your browser using AI.",
+  "requestFramePermissions": []
+}
