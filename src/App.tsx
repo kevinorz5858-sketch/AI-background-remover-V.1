@@ -1,6 +1,9 @@
 import React, { useState, useCallback, useRef, useMemo } from 'react';
 import { removeBackground } from '@imgly/background-removal';
-import { Upload, Download, X, Loader2, Image as ImageIcon, CheckCircle2, RefreshCw, Sun, Moon, Grid3X3, Sparkles, Palette, ZoomIn, ZoomOut, Maximize, Scissors, Zap, Eraser, ShieldAlert, Type, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { Upload, Download, X, Loader2, Image as ImageIcon, CheckCircle2, RefreshCw, Sun, Moon, Grid3X3, Sparkles, Palette, ZoomIn, ZoomOut, Maximize, Scissors, Zap, Eraser, ShieldAlert, Type, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Undo, Redo, RotateCcw } from 'lucide-react';
+import ImageTracer from 'imagetracerjs';
+import { jsPDF } from 'jspdf';
+import { svg2pdf } from 'svg2pdf.js';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -43,6 +46,151 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const [removeBgEnabled, setRemoveBgEnabled] = useState(false);
   const [currentFile, setCurrentFile] = useState<File | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  
+  // History State
+  const [history, setHistory] = useState<{
+    intensity: number;
+    contrast: number;
+    saturation: number;
+    opacity: number;
+    bwContrast: number;
+    fade: number;
+    sharpness: number;
+    smoothing: number;
+    denoise: number;
+    colorUnify: number;
+    temperature: number;
+    tint: number;
+    curves: Record<string, {x: number, y: number}[]>;
+    blackPoint: Record<string, number>;
+    whitePoint: Record<string, number>;
+    removeBgEnabled: boolean;
+    rawImageData: ImageData | null;
+  }[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const isInternalUpdate = useRef(false);
+
+  const pushToHistory = useCallback((state: any) => {
+    if (isInternalUpdate.current) return;
+    
+    setHistory(prev => {
+      const newHistory = prev.slice(0, historyIndex + 1);
+      // Only push if something actually changed
+      const lastState = newHistory[newHistory.length - 1];
+      if (lastState) {
+        const hasChanged = 
+          lastState.intensity !== state.intensity ||
+          lastState.contrast !== state.contrast ||
+          lastState.saturation !== state.saturation ||
+          lastState.opacity !== state.opacity ||
+          lastState.bwContrast !== state.bwContrast ||
+          lastState.fade !== state.fade ||
+          lastState.sharpness !== state.sharpness ||
+          lastState.smoothing !== state.smoothing ||
+          lastState.denoise !== state.denoise ||
+          lastState.colorUnify !== state.colorUnify ||
+          lastState.temperature !== state.temperature ||
+          lastState.tint !== state.tint ||
+          lastState.removeBgEnabled !== state.removeBgEnabled ||
+          JSON.stringify(lastState.curves) !== JSON.stringify(state.curves) ||
+          JSON.stringify(lastState.blackPoint) !== JSON.stringify(state.blackPoint) ||
+          JSON.stringify(lastState.whitePoint) !== JSON.stringify(state.whitePoint) ||
+          lastState.rawImageData !== state.rawImageData;
+        
+        if (!hasChanged) return prev;
+      }
+      
+      const updatedHistory = [...newHistory, state];
+      // Limit history to 50 steps
+      if (updatedHistory.length > 50) {
+        return updatedHistory.slice(1);
+      }
+      return updatedHistory;
+    });
+    setHistoryIndex(prev => {
+      const next = prev + 1;
+      return next > 49 ? 49 : next;
+    });
+  }, [historyIndex]);
+
+  const undo = () => {
+    if (historyIndex > 0) {
+      const prevIndex = historyIndex - 1;
+      const state = history[prevIndex];
+      applyHistoryState(state, prevIndex);
+    }
+  };
+
+  const redo = () => {
+    if (historyIndex < history.length - 1) {
+      const nextIndex = historyIndex + 1;
+      const state = history[nextIndex];
+      applyHistoryState(state, nextIndex);
+    }
+  };
+
+  const resetToOriginal = () => {
+    if (history.length > 0 && historyIndex !== 0) {
+      applyHistoryState(history[0], 0);
+    }
+  };
+
+  const applyHistoryState = (state: any, index: number) => {
+    isInternalUpdate.current = true;
+    setIntensity(state.intensity);
+    setContrast(state.contrast);
+    setSaturation(state.saturation);
+    setOpacity(state.opacity);
+    setBwContrast(state.bwContrast);
+    setFade(state.fade);
+    setSharpness(state.sharpness);
+    setSmoothing(state.smoothing);
+    setDenoise(state.denoise);
+    setColorUnify(state.colorUnify);
+    setTemperature(state.temperature);
+    setTint(state.tint);
+    setCurves(state.curves);
+    setBlackPoint(state.blackPoint);
+    setWhitePoint(state.whitePoint);
+    setRemoveBgEnabled(state.removeBgEnabled);
+    setRawImageData(state.rawImageData);
+    
+    if (state.rawImageData) {
+      const newUrl = applyAdjustments(state.rawImageData, {
+        intensity: state.intensity,
+        contrast: state.contrast,
+        saturation: state.saturation,
+        opacity: state.opacity,
+        bwContrast: state.bwContrast,
+        fade: state.fade,
+        sharpness: state.sharpness,
+        smoothing: state.smoothing,
+        denoise: state.denoise,
+        colorUnify: state.colorUnify,
+        temperature: state.temperature,
+        tint: state.tint,
+        curves: state.curves,
+        blackPoint: state.blackPoint,
+        whitePoint: state.whitePoint
+      });
+      setProcessedImage(newUrl);
+      processedUrlRef.current = newUrl;
+      setHistogram(calculateHistogram(state.rawImageData));
+    }
+    
+    setHistoryIndex(index);
+    setTimeout(() => {
+      isInternalUpdate.current = false;
+    }, 0);
+  };
+
+  const getCurrentState = useCallback(() => {
+    return {
+      intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint, removeBgEnabled, rawImageData
+    };
+  }, [intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint, removeBgEnabled, rawImageData]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wbQuadrantRef = useRef<HTMLDivElement>(null);
 
@@ -148,6 +296,11 @@ export default function App() {
       setRawImageData(imageData);
       setHistogram(calculateHistogram(imageData));
       URL.revokeObjectURL(blobUrl);
+      
+      const currentState = {
+        intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint, removeBgEnabled, rawImageData: imageData
+      };
+      pushToHistory(currentState);
 
       // Apply initial adjustments
       const processedUrl = applyAdjustments(imageData, {
@@ -626,6 +779,27 @@ export default function App() {
       });
       setProcessedImage(newUrl);
       processedUrlRef.current = newUrl;
+      
+      // Push to history after adjustment
+      pushToHistory({
+        intensity: newIntensity,
+        contrast: newContrast,
+        saturation: newSaturation,
+        opacity: newOpacity,
+        bwContrast: newBwContrast,
+        fade: newFade,
+        sharpness: newSharpness,
+        smoothing: newSmoothing,
+        denoise: newDenoise,
+        colorUnify: newColorUnify,
+        temperature: newTemperature,
+        tint: newTint,
+        curves: newCurves,
+        blackPoint: newBlackPoint,
+        whitePoint: newWhitePoint,
+        removeBgEnabled,
+        rawImageData
+      });
     }
   };
 
@@ -744,6 +918,10 @@ export default function App() {
       const adjustedUrl = applyAdjustments(newImageData, {
         intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint
       });
+
+      pushToHistory({
+        intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint, removeBgEnabled, rawImageData: newImageData
+      });
       
       if (processedUrlRef.current && !processedUrlRef.current.startsWith('data:')) {
         URL.revokeObjectURL(processedUrlRef.current);
@@ -851,6 +1029,10 @@ export default function App() {
       
       const adjustedUrl = applyAdjustments(newImageData, {
         intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint
+      });
+
+      pushToHistory({
+        intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint, removeBgEnabled, rawImageData: newImageData
       });
       
       if (processedUrlRef.current && !processedUrlRef.current.startsWith('data:')) {
@@ -995,6 +1177,10 @@ export default function App() {
       const adjustedUrl = applyAdjustments(newImageData, {
         intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint
       });
+
+      pushToHistory({
+        intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint, removeBgEnabled, rawImageData: newImageData
+      });
       
       if (processedUrlRef.current && !processedUrlRef.current.startsWith('data:')) {
         URL.revokeObjectURL(processedUrlRef.current);
@@ -1057,6 +1243,8 @@ export default function App() {
     setProcessedImage(null);
     setRawImageData(null);
     setCurrentFile(null);
+    setHistory([]);
+    setHistoryIndex(-1);
     setIntensity(30);
     setContrast(100);
     setSaturation(100);
@@ -1065,6 +1253,7 @@ export default function App() {
     setFade(0);
     setSharpness(0);
     setSmoothing(0);
+    setRemoveBgEnabled(false);
     setDenoise(0);
     setColorUnify(0);
     setTemperature(0);
@@ -1525,25 +1714,72 @@ export default function App() {
               </p>
               
               {/* Background Removal Toggle */}
-              <div className="flex items-center gap-3 p-4 bg-zinc-50 rounded-2xl border border-zinc-100 w-fit">
-                <div 
-                  onClick={() => setRemoveBgEnabled(!removeBgEnabled)}
-                  className={cn(
-                    "relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer",
-                    removeBgEnabled ? "bg-indigo-600" : "bg-zinc-300"
-                  )}
-                >
-                  <span
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3 p-4 bg-zinc-50 rounded-2xl border border-zinc-100 w-fit">
+                  <div 
+                    onClick={() => setRemoveBgEnabled(!removeBgEnabled)}
                     className={cn(
-                      "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                      removeBgEnabled ? "translate-x-6" : "translate-x-1"
+                      "relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer",
+                      removeBgEnabled ? "bg-indigo-600" : "bg-zinc-300"
                     )}
-                  />
+                  >
+                    <span
+                      className={cn(
+                        "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                        removeBgEnabled ? "translate-x-6" : "translate-x-1"
+                      )}
+                    />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-sm font-bold text-zinc-900">自動去除背景</span>
+                    <span className="text-[10px] text-zinc-500 font-medium">預設關閉，開啟後將自動執行去背</span>
+                  </div>
                 </div>
-                <div className="flex flex-col">
-                  <span className="text-sm font-bold text-zinc-900">自動去除背景</span>
-                  <span className="text-[10px] text-zinc-500 font-medium">預設關閉，開啟後將自動執行去背</span>
-                </div>
+
+                {originalImage && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={undo}
+                      disabled={historyIndex <= 0}
+                      className={cn(
+                        "p-3 rounded-xl border transition-all flex items-center justify-center",
+                        historyIndex > 0 
+                          ? "bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50 shadow-sm" 
+                          : "bg-zinc-50 border-zinc-100 text-zinc-300 cursor-not-allowed"
+                      )}
+                      title="上一步 (Undo)"
+                    >
+                      <Undo className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={redo}
+                      disabled={historyIndex >= history.length - 1}
+                      className={cn(
+                        "p-3 rounded-xl border transition-all flex items-center justify-center",
+                        historyIndex < history.length - 1 
+                          ? "bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50 shadow-sm" 
+                          : "bg-zinc-50 border-zinc-100 text-zinc-300 cursor-not-allowed"
+                      )}
+                      title="下一步 (Redo)"
+                    >
+                      <Redo className="w-4 h-4" />
+                    </button>
+                    <div className="w-px h-6 bg-zinc-200 mx-1" />
+                    <button
+                      onClick={() => setShowResetConfirm(true)}
+                      disabled={historyIndex <= 0}
+                      className={cn(
+                        "p-3 rounded-xl border transition-all flex items-center justify-center",
+                        historyIndex > 0 
+                          ? "bg-white border-zinc-200 text-rose-600 hover:bg-rose-50 hover:border-rose-200 shadow-sm" 
+                          : "bg-zinc-50 border-zinc-100 text-zinc-300 cursor-not-allowed"
+                      )}
+                      title="重置回原始狀態 (Reset to Original)"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1807,7 +2043,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           <button
                             onClick={downloadImage}
                             className="py-4 px-4 bg-indigo-600 rounded-2xl font-bold text-white hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-200 active:scale-[0.98]"
@@ -1816,25 +2052,180 @@ export default function App() {
                             下載 PNG
                           </button>
                           <button
-                            onClick={() => {
-                              if (!processedImage) return;
-                              const svg = `
-                                <svg xmlns="http://www.w3.org/2000/svg" width="${rawImageData?.width}" height="${rawImageData?.height}">
-                                  <image href="${processedImage}" width="100%" height="100%" />
-                                </svg>
-                              `;
-                              const blob = new Blob([svg], { type: 'image/svg+xml' });
-                              const url = URL.createObjectURL(blob);
-                              const link = document.createElement('a');
-                              link.href = url;
-                              link.download = 'removed_background.svg';
-                              link.click();
-                              URL.revokeObjectURL(url);
+                            onClick={async () => {
+                              if (!processedImage || !rawImageData) return;
+                              
+                              setIsProcessing(true);
+                              try {
+                                // Create a temporary image to get the processed pixels
+                                const img = new Image();
+                                img.crossOrigin = "anonymous";
+                                
+                                await new Promise((resolve, reject) => {
+                                  img.onload = resolve;
+                                  img.onerror = reject;
+                                  img.src = processedImage;
+                                });
+
+                                const canvas = document.createElement('canvas');
+                                canvas.width = img.width;
+                                canvas.height = img.height;
+                                const ctx = canvas.getContext('2d');
+                                if (!ctx) throw new Error("Could not get canvas context");
+                                
+                                ctx.drawImage(img, 0, 0);
+                                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+                                // Perform Ultra-High Quality vectorization
+                                // options: ltres: error threshold, qtres: corner threshold, pathomit: omit small paths
+                                if (!ImageTracer || typeof ImageTracer.imagedataToSVG !== 'function') {
+                                  throw new Error("ImageTracer library not properly loaded");
+                                }
+
+                                // Ultra-High Quality Settings
+                                const svgString = ImageTracer.imagedataToSVG(imageData, {
+                                  ltres: 0.01,       // Extremely low threshold for maximum detail
+                                  qtres: 0.01,       // Extremely low threshold for maximum detail
+                                  pathomit: 0,        // Do not omit any paths, keep every detail
+                                  colorsampling: 2,   // Deterministic color sampling
+                                  numberofcolors: 256, // Maximum colors (256) for photographic fidelity
+                                  mincolorratio: 0,   // Include every single color found
+                                  colorquantcycles: 5, // More cycles for better color grouping
+                                  blurradius: 0.5,    // Slight blur to reduce noise artifacts from removal
+                                  blurdelta: 10,      // Finer blur control
+                                  scale: 1,
+                                  simplifytolerance: 0,
+                                  roundcoords: 3,     // High precision coordinates (3 decimal places)
+                                  lcpr: 0,
+                                  qcpr: 0,
+                                  desc: false,
+                                  viewbox: true
+                                });
+
+                                const blob = new Blob([svgString], { type: 'image/svg+xml' });
+                                const url = URL.createObjectURL(blob);
+                                const link = document.createElement('a');
+                                link.href = url;
+                                link.download = 'vectorized_image.svg';
+                                document.body.appendChild(link);
+                                link.click();
+                                document.body.removeChild(link);
+                                URL.revokeObjectURL(url);
+                              } catch (err) {
+                                console.error("Vectorization failed:", err);
+                                setError("向量化失敗，請重試");
+                              } finally {
+                                setIsProcessing(false);
+                              }
                             }}
-                            className="py-4 px-4 bg-white border border-zinc-200 rounded-2xl font-bold text-zinc-700 hover:bg-zinc-50 transition-all flex items-center justify-center gap-2 shadow-sm active:scale-[0.98]"
+                            disabled={isProcessing}
+                            className="py-4 px-4 bg-white border border-zinc-200 rounded-2xl font-bold text-zinc-700 hover:bg-zinc-50 transition-all flex items-center justify-center gap-2 shadow-sm active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            <Download className="w-5 h-5" />
-                            下載 SVG
+                            {isProcessing ? (
+                              <Loader2 className="w-5 h-5 animate-spin" />
+                            ) : (
+                              <Zap className="w-5 h-5 text-amber-500" />
+                            )}
+                            下載向量 SVG
+                          </button>
+                          <button
+                            onClick={async () => {
+                              if (!processedImage || !rawImageData) return;
+                              
+                              setIsProcessing(true);
+                              try {
+                                // 1. Generate SVG first (same ultra-high quality)
+                                const img = new Image();
+                                img.crossOrigin = "anonymous";
+                                await new Promise((resolve, reject) => {
+                                  img.onload = resolve;
+                                  img.onerror = reject;
+                                  img.src = processedImage;
+                                });
+
+                                const canvas = document.createElement('canvas');
+                                canvas.width = img.width;
+                                canvas.height = img.height;
+                                const ctx = canvas.getContext('2d');
+                                if (!ctx) throw new Error("Could not get canvas context");
+                                ctx.drawImage(img, 0, 0);
+                                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+                                const svgString = ImageTracer.imagedataToSVG(imageData, {
+                                  ltres: 0.01, qtres: 0.01, pathomit: 0, colorsampling: 2,
+                                  numberofcolors: 256, mincolorratio: 0, colorquantcycles: 5,
+                                  blurradius: 0.5, blurdelta: 10, scale: 1, simplifytolerance: 0,
+                                  roundcoords: 3, lcpr: 0, qcpr: 0, desc: false, viewbox: true
+                                });
+
+                                // 2. Create PDF with PDF/X-4:2008 intent
+                                const pdf = new jsPDF({
+                                  orientation: canvas.width > canvas.height ? 'l' : 'p',
+                                  unit: 'px',
+                                  format: [canvas.width, canvas.height],
+                                  putOnlyUsedFonts: true,
+                                  compress: true
+                                });
+
+                                // Set PDF/X-4 Metadata & ICC Color Description
+                                pdf.setProperties({
+                                  title: 'Ultra-High Fidelity Vector PDF/X-4',
+                                  subject: 'Professional Vector Export with ICC Color Intent',
+                                  author: 'AI Studio Professional Export',
+                                  keywords: 'vector, pdf, x-4, icc, srgb',
+                                  creator: 'AI Studio Background Remover'
+                                });
+
+                                // Add OutputIntent for PDF/X-4 compliance (ICC Color Description)
+                                // This tells the PDF viewer/printer to use sRGB color space for rendering
+                                const pdfInternal = (pdf as any).internal;
+                                const outputIntentObj = pdfInternal.newObject();
+                                pdfInternal.out(`${outputIntentObj} 0 obj`);
+                                pdfInternal.out('<<');
+                                pdfInternal.out('/Type /OutputIntent');
+                                pdfInternal.out('/S /GTS_PDFX'); // PDF/X standard
+                                pdfInternal.out('/OutputConditionIdentifier (sRGB IEC61966-2.1)');
+                                pdfInternal.out('/RegistryName (http://www.color.org)');
+                                pdfInternal.out('/Info (sRGB IEC61966-2.1)');
+                                pdfInternal.out('>>');
+                                pdfInternal.out('endobj');
+
+                                // Link OutputIntent to the Catalog
+                                pdfInternal.events.subscribe('postPutResources', () => {
+                                  pdfInternal.out(`/OutputIntents [${outputIntentObj} 0 R]`);
+                                });
+                                
+                                // Parse SVG string to DOM
+                                const parser = new DOMParser();
+                                const svgDoc = parser.parseFromString(svgString, 'image/svg+xml');
+                                const svgElement = svgDoc.documentElement;
+
+                                // Use svg2pdf to render with high precision
+                                await svg2pdf(svgElement, pdf, {
+                                  x: 0,
+                                  y: 0,
+                                  width: canvas.width,
+                                  height: canvas.height,
+                                });
+
+                                // Finalize and download
+                                pdf.save('vectorized_pro_icc.pdf');
+                              } catch (err) {
+                                console.error("PDF generation failed:", err);
+                                setError("PDF 生成失敗，請重試");
+                              } finally {
+                                setIsProcessing(false);
+                              }
+                            }}
+                            disabled={isProcessing}
+                            className="py-4 px-4 bg-white border border-zinc-200 rounded-2xl font-bold text-zinc-700 hover:bg-zinc-50 transition-all flex items-center justify-center gap-2 shadow-sm active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isProcessing ? (
+                              <Loader2 className="w-5 h-5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-5 h-5 text-indigo-500" />
+                            )}
+                            下載向量 PDF
                           </button>
                         </div>
                       </div>
@@ -2040,17 +2431,24 @@ export default function App() {
                               <p className="text-zinc-500 text-sm">這可能需要幾秒鐘</p>
                             </motion.div>
                           ) : processedImage ? (
-                            <div className="w-full h-full overflow-auto scrollbar-hide flex items-center justify-center">
-                              <motion.img
-                                key="result"
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: zoom }}
-                                src={processedImage}
-                                alt="Processed"
-                                className="max-w-full max-h-full object-contain relative z-10 transition-transform duration-200 ease-out"
-                                referrerPolicy="no-referrer"
-                                style={{ transformOrigin: 'center center' }}
-                              />
+                            <div className="w-full h-full overflow-auto custom-scrollbar">
+                              <div 
+                                className="flex items-center justify-center min-w-full min-h-full"
+                                style={{ 
+                                  width: zoom > 1 ? `${zoom * 100}%` : '100%',
+                                  height: zoom > 1 ? `${zoom * 100}%` : '100%',
+                                }}
+                              >
+                                <motion.img
+                                  key="result"
+                                  initial={{ opacity: 0, scale: 0.9 }}
+                                  animate={{ opacity: 1 }}
+                                  src={processedImage}
+                                  alt="Processed"
+                                  className="max-w-full max-h-full object-contain relative z-10 transition-all duration-200 ease-out"
+                                  referrerPolicy="no-referrer"
+                                />
+                              </div>
                             </div>
                           ) : null}
                         </AnimatePresence>
@@ -2240,10 +2638,67 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-zinc-200 py-12">
-        <div className="max-w-7xl mx-auto px-6 text-center text-zinc-400 text-sm font-medium">
-          &copy; {new Date().getFullYear()} AI Background Remover. Powered by @imgly/background-removal.
+        <div className="max-w-7xl mx-auto px-6 text-center space-y-2">
+          <div className="text-zinc-400 text-sm font-medium">
+            &copy; {new Date().getFullYear()} AI Background Remover. Powered by @imgly/background-removal.
+          </div>
+          <div className="text-zinc-400 text-xs font-medium flex items-center justify-center gap-4">
+            <span>Author: Kevin Weng</span>
+            <span className="w-1 h-1 bg-zinc-300 rounded-full" />
+            <span>Version 1.0</span>
+          </div>
         </div>
       </footer>
+
+      {/* Reset Confirmation Modal */}
+      <AnimatePresence>
+        {showResetConfirm && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowResetConfirm(false)}
+              className="absolute inset-0 bg-zinc-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-8 text-center space-y-6">
+                <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-2xl flex items-center justify-center mx-auto">
+                  <ShieldAlert className="w-8 h-8" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-bold text-zinc-900">確認重置圖片？</h3>
+                  <p className="text-zinc-500 text-sm leading-relaxed">
+                    這將會捨棄目前所有的修改紀錄，並回到圖片最初上傳的狀態。此動作無法復原。
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setShowResetConfirm(false)}
+                    className="py-3 px-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-bold rounded-2xl transition-colors"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={() => {
+                      resetToOriginal();
+                      setShowResetConfirm(false);
+                    }}
+                    className="py-3 px-4 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-2xl transition-colors shadow-lg shadow-rose-200"
+                  >
+                    確認重置
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

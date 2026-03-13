@@ -10,4 +10,19 @@
     background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
     background-color: white;
   }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #e4e4e7;
+    border-radius: 10px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #d4d4d8;
+  }
 }
