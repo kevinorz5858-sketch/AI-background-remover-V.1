@@ -131,9 +131,73 @@ export default function App() {
   };
 
   const resetToOriginal = () => {
-    if (history.length > 0 && historyIndex !== 0) {
-      applyHistoryState(history[0], 0);
+    if (!currentFile) return;
+    
+    isInternalUpdate.current = true;
+    
+    // Show processing state immediately
+    setProcessedImage(null);
+    setIsProcessing(true);
+    
+    const defaultParams = {
+      intensity: 30,
+      contrast: 100,
+      saturation: 100,
+      opacity: 100,
+      bwContrast: 0,
+      fade: 0,
+      sharpness: 0,
+      smoothing: 0,
+      denoise: 0,
+      colorUnify: 0,
+      temperature: 0,
+      tint: 0,
+      curves: {
+        rgb: [{x: 0, y: 0}, {x: 255, y: 255}],
+        red: [{x: 0, y: 0}, {x: 255, y: 255}],
+        green: [{x: 0, y: 0}, {x: 255, y: 255}],
+        blue: [{x: 0, y: 0}, {x: 255, y: 255}],
+      },
+      blackPoint: { rgb: 0, red: 0, green: 0, blue: 0 },
+      whitePoint: { rgb: 255, red: 255, green: 255, blue: 255 },
+    };
+
+    // Reset all sliders to defaults
+    setIntensity(defaultParams.intensity);
+    setContrast(defaultParams.contrast);
+    setSaturation(defaultParams.saturation);
+    setOpacity(defaultParams.opacity);
+    setBwContrast(defaultParams.bwContrast);
+    setFade(defaultParams.fade);
+    setSharpness(defaultParams.sharpness);
+    setSmoothing(defaultParams.smoothing);
+    setDenoise(defaultParams.denoise);
+    setColorUnify(defaultParams.colorUnify);
+    setTemperature(defaultParams.temperature);
+    setTint(defaultParams.tint);
+    setCurves(defaultParams.curves);
+    setBlackPoint(defaultParams.blackPoint);
+    setWhitePoint(defaultParams.whitePoint);
+    
+    // Clear history and start fresh
+    setHistory([]);
+    setHistoryIndex(-1);
+    
+    const wasRemoveBgEnabled = removeBgEnabled;
+    if (wasRemoveBgEnabled) {
+      // This will trigger the useEffect which calls processImage
+      // We don't need to manually call processImage because the useEffect will catch it
+      // and it will see the updated state values in the next render.
+      setRemoveBgEnabled(false);
+    } else {
+      // Manually trigger if it was already disabled, passing default params
+      processImage(currentFile, { removeBg: false, params: defaultParams });
     }
+    
+    // Allow history pushing after a short delay to catch the result of processImage
+    setTimeout(() => {
+      isInternalUpdate.current = false;
+    }, 500);
   };
 
   const applyHistoryState = (state: any, index: number) => {
@@ -217,7 +281,7 @@ export default function App() {
     return hist.map(v => v / max);
   };
 
-  const processImage = async (file: File) => {
+  const processImage = async (file: File, options?: { removeBg?: boolean, params?: any }) => {
     setCurrentFile(file);
     const isAvif = file.name.toLowerCase().endsWith('.avif') || file.type === 'image/avif';
     
@@ -274,7 +338,8 @@ export default function App() {
 
       let finalBlob: Blob | File = fileToProcess;
 
-      if (removeBgEnabled) {
+      const shouldRemoveBg = options?.removeBg ?? removeBgEnabled;
+      if (shouldRemoveBg) {
         finalBlob = await removeBackground(fileToProcess, {
           progress: (status, progress) => {
             console.log(`Processing: ${status} (${Math.round(progress * 100)}%)`);
@@ -297,15 +362,19 @@ export default function App() {
       setHistogram(calculateHistogram(imageData));
       URL.revokeObjectURL(blobUrl);
       
+      const p = options?.params ?? {
+        intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint
+      };
+
       const currentState = {
-        intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint, curves, blackPoint, whitePoint, removeBgEnabled, rawImageData: imageData
+        ...p,
+        removeBgEnabled: shouldRemoveBg,
+        rawImageData: imageData
       };
       pushToHistory(currentState);
 
       // Apply initial adjustments
-      const processedUrl = applyAdjustments(imageData, {
-        intensity, contrast, saturation, opacity, bwContrast, fade, sharpness, smoothing, denoise, colorUnify, temperature, tint
-      });
+      const processedUrl = applyAdjustments(imageData, p);
       processedUrlRef.current = processedUrl;
       setProcessedImage(processedUrl);
     } catch (err) {
